@@ -23,7 +23,7 @@ pcap_t* handle;
 
 void usage()
 {
-  printf("usage  : sudo ./send_arp <interface> <sender ip> <target ip>\n");
+	printf("usage  : sudo ./send_arp <interface> <sender ip> <target ip>\n");
 	printf("sample : sudo ./send_arp eth0 192.168.0.2 192.168.0.1\n");
 }
 
@@ -139,14 +139,14 @@ int main(int argc, char **argv)
 		usage();
 		return -1;
 	}
-  printf("[+]Send_ARP\n");
+	printf("[+]Send_ARP\n");
 	char dev[8],errbuf[PCAP_ERRBUF_SIZE];
 	uint32_t mask, net;
 	struct in_addr addr;
 	char myip[20],mymac[6];
 
 	strncpy(dev,argv[1],8);
-  if(dev == NULL)
+	if(dev == NULL)
 	{
 		printf("[-]Failed to find network device.\n");
 		return -1;
@@ -160,12 +160,12 @@ int main(int argc, char **argv)
 
 	pcap_if_t *alldev;
 	bool mac_ok=false,ip_ok=false;
-  if(pcap_findalldevs(&alldev, errbuf)!=0)
+	if(pcap_findalldevs(&alldev, errbuf)!=0)
 	{
 	  printf("[-]Failed to find network devices.\n");
 	  return -1;
 	}
-  for(pcap_if_t *i=alldev; i != NULL ; i=i->next)
+	for(pcap_if_t *i=alldev; i != NULL ; i=i->next)
 	{
 		if(strcmp(i->name,dev))continue;
 		for(pcap_addr_t *j=i->addresses; j != NULL ; j=j->next)
@@ -195,7 +195,7 @@ int main(int argc, char **argv)
 	printf("[*]Sender IP   : %s\n",senderip);
 	printf("[*]Target IP   : %s\n",targetip);
 	puts("");
-  find_target_mac(dev,myip,mymac,targetip,targetmac);
+	find_target_mac(dev,myip,mymac,targetip,targetmac);
 	puts("");
 	fake_arp_reply(senderip,mymac,targetip,targetmac);
 	puts("");
