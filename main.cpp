@@ -35,7 +35,7 @@ void print_mac(uint8_t*mac)
 void find_target_mac(char*dev,char*my_ip, char*my_mac, char*target_ip, char*target_mac)
 {
 	char errbuf[PCAP_ERRBUF_SIZE];
-  printf("[+]Finding Target Mac\n");
+	printf("[+]Finding Target Mac\n");
 	
 	struct libnet_ethernet_hdr*ethhdr=0;
 	struct libnet_arp_hdr*arphdr=0;
