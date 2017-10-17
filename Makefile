@@ -1,11 +1,11 @@
-all : send_arp
+all : arp_spoof
 
-send_arp : main.o
-	g++ -g -o send_arp main.o -lpcap
+arp_spoof : main.o
+	g++ -g -o arp_spoof main.o -lpcap -pthread
 
 main.o:
 	g++ -g -c -o main.o main.cpp
 
 clean:
-	rm -f pcap_test
+	rm -f arp_spoof
 	rm -f *.o
